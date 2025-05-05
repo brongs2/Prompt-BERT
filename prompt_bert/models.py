@@ -383,23 +383,25 @@ def sentemb_forward(
         hidden_states=outputs.hidden_states,
     )
 
-
-class BertForCL(BertPreTrainedModel):
+class BertForCLCoOp(BertPreTrainedModel):
+    """
+    BERT contrastive learning with Contextual Prompting (CoOp).
+    """
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
     def __init__(self, config, *model_args, **model_kargs):
         super().__init__(config)
         self.model_args = model_kargs["model_args"]
         self.bert = BertModel(config)
-
-        if self.model_args.mask_embedding_sentence_autoprompt:
-            # register p_mbv in init, avoid not saving weight
-            self.p_mbv = torch.nn.Parameter(torch.zeros(10))
-            for param in self.bert.parameters():
-                param.requires_grad = False
-
+        # CoOp: learnable prompt embeddings
+        self.coop_length = getattr(self.model_args, 'coop_length', 0)
+        if self.model_args.use_coop and self.coop_length > 0:
+            # (coop_length, hidden_size)
+            self.prompt_embeddings = nn.Parameter(
+                torch.randn(self.coop_length, config.hidden_size)
+            )
+        # initialize contrastive head
         cl_init(self, config)
-
 
     def forward(self,
         input_ids=None,
@@ -414,32 +416,99 @@ class BertForCL(BertPreTrainedModel):
         return_dict=None,
         sent_emb=False,
     ):
+        # Prepare CoOp embeddings if enabled
+        if inputs_embeds is None:
+            # Flatten input_ids: (batch_size * num_sent, seq_len)
+            batch_size, num_sent, seq_len = input_ids.size()
+            flat_ids = input_ids.view(-1, seq_len)
+            inputs_embeds = self.bert.embeddings.word_embeddings(flat_ids)
+
+            if getattr(self.model_args, 'use_coop', False) and self.coop_length > 0:
+                # Expand prompt: (batch_size * num_sent, coop_length, hidden)
+                prompt = self.prompt_embeddings.unsqueeze(0).expand(
+                    batch_size * num_sent, -1, -1
+                )
+                # Concatenate prompt + original embeddings
+                inputs_embeds = torch.cat([prompt, inputs_embeds], dim=1)
+                # Adjust attention mask
+                flat_mask = attention_mask.view(-1, seq_len)
+                coop_mask = torch.ones(
+                    batch_size * num_sent, self.coop_length,
+                    device=flat_mask.device, dtype=flat_mask.dtype
+                )
+                attention_mask = torch.cat([coop_mask, flat_mask], dim=1)
+                token_type_ids = None  # or handle similarly if needed
+
+        # Route to contrastive or embedding forward
         if sent_emb:
             return sentemb_forward(self, self.bert,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-                position_ids=position_ids,
-                head_mask=head_mask,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
+                                   input_ids=None,
+                                   attention_mask=attention_mask,
+                                   token_type_ids=token_type_ids,
+                                   position_ids=position_ids,
+                                   head_mask=head_mask,
+                                   inputs_embeds=inputs_embeds,
+                                   labels=labels,
+                                   output_attentions=output_attentions,
+                                   output_hidden_states=output_hidden_states,
+                                   return_dict=return_dict)
         else:
             return cl_forward(self, self.bert,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-                position_ids=position_ids,
-                head_mask=head_mask,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
+                              input_ids=None,
+                              attention_mask=attention_mask,
+                              token_type_ids=token_type_ids,
+                              position_ids=position_ids,
+                              head_mask=head_mask,
+                              inputs_embeds=inputs_embeds,
+                              labels=labels,
+                              output_attentions=output_attentions,
+                              output_hidden_states=output_hidden_states,
+                              return_dict=return_dict)
+
+# 1. model.py 내부 - BertForCL 클래스 내부에 추가
+class BertForCL(BertPreTrainedModel):
+    def __init__(self, config, *model_args, **model_kargs):
+        super().__init__(config)
+        self.model_args = model_kargs["model_args"]
+        self.bert = BertModel(config)
+
+        if self.model_args.use_coop:
+            self.prompt_embeddings = nn.Parameter(
+                torch.randn(self.model_args.coop_length, config.hidden_size)
             )
+
+        cl_init(self, config)
+
+
+# 2. cl_forward 함수 수정 (co-op prompt 붙이기)
+def cl_forward(cls, encoder, input_ids=None, attention_mask=None, ...):
+    ...
+    if self.model_args.use_coop:
+        # prompt 생성 (bs, coop_len, hidden)
+        prompt = cls.prompt_embeddings.unsqueeze(0).expand(input_ids.size(0), -1, -1)
+        input_embed = encoder.embeddings.word_embeddings(input_ids)
+        inputs_embeds = torch.cat([prompt, input_embed], dim=1)
+
+        # attention mask 수정
+        prompt_mask = torch.ones((attention_mask.size(0), cls.model_args.coop_length), device=attention_mask.device)
+        attention_mask = torch.cat([prompt_mask, attention_mask], dim=1)
+
+        input_ids = None  # input_ids 대신 inputs_embeds 사용
+    ...
+    outputs = encoder(
+        input_ids=input_ids,
+        inputs_embeds=inputs_embeds,
+        attention_mask=attention_mask,
+        ...
+    )
+
+
+# 3. evaluation.py 와 train.py 에 Argument 추가
+parser.add_argument("--use_coop", action="store_true")
+parser.add_argument("--coop_length", type=int, default=10)
+
+
+
 
 
 class RobertaForCL(RobertaPreTrainedModel):

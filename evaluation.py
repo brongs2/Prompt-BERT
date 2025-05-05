@@ -81,6 +81,8 @@ def main():
     parser.add_argument('--mask_embedding_sentence_use_pooler', action='store_true')
     parser.add_argument('--mask_embedding_sentence_autoprompt', action='store_true')
     parser.add_argument('--mask_embedding_sentence_org_mlp', action='store_true')
+    parser.add_argument('--use_coop', action='store_true', help='Enable CoOp prompting')
+    parser.add_argument('--coop_length', type=int, default=10, help='CoOp prompt length')
     parser.add_argument("--tokenizer_name", type=str, default='')
     parser.add_argument("--model_name_or_path", type=str,
             help="Transformers' model name or path")
