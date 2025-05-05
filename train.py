@@ -34,7 +34,7 @@ from transformers import (
 from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTrainedTokenizerBase
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
-from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
+from transformers.file_utils import cached_property, is_torch_available, is_torch_tpu_available
 from prompt_bert.models import RobertaForCL, BertForCL
 from prompt_bert.trainers import CLTrainer
 
@@ -43,6 +43,13 @@ MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 @dataclass
+class PromptArguments:
+    train_mode: str = field(default="prompt")
+    pooler: str = field(default="cls")
+    prompt_template: Optional[str] = field(default=None)
+    max_length: int = field(default=32)
+@dataclass
+
 class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
@@ -84,6 +91,14 @@ class ModelArguments:
             "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
             "with private models)."
         },
+    )
+    use_coop: bool = field(
+        default=False,
+        metadata={"help": "Enable Contextual Prompting (CoOp)"},
+      )
+    coop_length: int = field(
+        default=10,
+        metadata={"help": "Number of trainable prompt tokens for CoOp"},
     )
 
     temp: float = field(
@@ -375,6 +390,7 @@ class DataTrainingArguments:
         metadata={"help": "Ratio of tokens to mask for MLM (only effective if --do_mlm)"}
     )
     def __post_init__(self):
+        self.validation_file = None  # 위쪽에 강제로 추가
         if self.dataset_name is None and self.train_file is None and self.validation_file is None:
             raise ValueError("Need either a dataset name or a training/validation file.")
         else:
@@ -419,7 +435,6 @@ class OurTrainingArguments(TrainingArguments):
     )
 
     @cached_property
-    @torch_required
     def _setup_devices(self) -> "torch.device":
         logger.info("PyTorch: setting up devices")
         if self.no_cuda:
@@ -471,14 +486,12 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, OurTrainingArguments))
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, PromptArguments))
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+        model_args, data_args, training_args, prompt_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    else:
+        model_args, data_args, training_args, prompt_args = parser.parse_args_into_dataclasses()
     if (
         os.path.exists(training_args.output_dir)
         and os.listdir(training_args.output_dir)

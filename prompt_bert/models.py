@@ -480,33 +480,6 @@ class BertForCL(BertPreTrainedModel):
         cl_init(self, config)
 
 
-# 2. cl_forward 함수 수정 (co-op prompt 붙이기)
-def cl_forward(cls, encoder, input_ids=None, attention_mask=None, ...):
-    ...
-    if self.model_args.use_coop:
-        # prompt 생성 (bs, coop_len, hidden)
-        prompt = cls.prompt_embeddings.unsqueeze(0).expand(input_ids.size(0), -1, -1)
-        input_embed = encoder.embeddings.word_embeddings(input_ids)
-        inputs_embeds = torch.cat([prompt, input_embed], dim=1)
-
-        # attention mask 수정
-        prompt_mask = torch.ones((attention_mask.size(0), cls.model_args.coop_length), device=attention_mask.device)
-        attention_mask = torch.cat([prompt_mask, attention_mask], dim=1)
-
-        input_ids = None  # input_ids 대신 inputs_embeds 사용
-    ...
-    outputs = encoder(
-        input_ids=input_ids,
-        inputs_embeds=inputs_embeds,
-        attention_mask=attention_mask,
-        ...
-    )
-
-
-# 3. evaluation.py 와 train.py 에 Argument 추가
-parser.add_argument("--use_coop", action="store_true")
-parser.add_argument("--coop_length", type=int, default=10)
-
 
 
 
