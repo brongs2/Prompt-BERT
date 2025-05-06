@@ -23,7 +23,6 @@ from transformers.trainer_utils import (
     PredictionOutput,
     TrainOutput,
     default_compute_objective,
-    default_hp_space,
     set_seed,
     speed_metrics,
 )
@@ -32,7 +31,6 @@ from transformers.file_utils import (
     is_apex_available,
     is_datasets_available,
     is_in_notebook,
-    is_torch_tpu_available,
 )
 from transformers.trainer_callback import (
     CallbackHandler,
@@ -57,10 +55,6 @@ from torch.utils.data.dataset import Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.sampler import RandomSampler, SequentialSampler
 
-if is_torch_tpu_available():
-    import torch_xla.core.xla_model as xm
-    import torch_xla.debug.metrics as met
-    import torch_xla.distributed.parallel_loader as pl
 
 if is_apex_available():
     from apex import amp
@@ -72,7 +66,8 @@ if version.parse(torch.__version__) >= version.parse("1.6"):
 if is_datasets_available():
     import datasets
 
-from transformers.optimization import Adafactor, AdamW, get_scheduler
+from torch.optim import AdamW
+from transformers.optimization import Adafactor, get_scheduler
 import copy
 # Set path to SentEval
 PATH_TO_SENTEVAL = './SentEval'
@@ -179,12 +174,6 @@ class CLTrainer(Trainer):
                 if self.sharded_dpp:
                     self.optimizer.consolidate_state_dict()
 
-                if is_torch_tpu_available():
-                    xm.rendezvous("saving_optimizer_states")
-                    xm.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                    with warnings.catch_warnings(record=True) as caught_warnings:
-                        xm.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                        reissue_pt_warnings(caught_warnings)
                 elif self.is_world_process_zero() and not self.deepspeed:
                     # deepspeed.save_checkpoint above saves model/optim/sched
                     torch.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
@@ -332,18 +321,21 @@ class CLTrainer(Trainer):
         if self.sharded_ddp:
             model = ShardedDDP(model, self.optimizer)
         elif self.args.local_rank != -1:
-            model = torch.nn.parallel.DistributedDataParallel(
-                model,
-                device_ids=[self.args.local_rank],
-                output_device=self.args.local_rank,
-                find_unused_parameters=(
-                    not getattr(model.config, "gradient_checkpointing", False)
-                    if isinstance(model, PreTrainedModel)
-                    else True
-                ),
-            )
-            # find_unused_parameters breaks checkpointing as per
-            # https://github.com/huggingface/transformers/pull/4659#issuecomment-643356021
+            if torch.distributed.is_initialized():
+                model = torch.nn.parallel.DistributedDataParallel(
+                    model,
+                    device_ids=[self.args.local_rank],
+                    output_device=self.args.local_rank,
+                    find_unused_parameters=(
+                        not getattr(model.config, "gradient_checkpointing", False)
+                        if isinstance(model, PreTrainedModel)
+                        else True
+                    ),
+                )
+                # find_unused_parameters breaks checkpointing as per
+                # https://github.com/huggingface/transformers/pull/4659#issuecomment-643356021
+            else:
+                logger.warning("Distributed training was enabled but torch.distributed is not initialized.")
 
         # for the rest of this function `model` is the outside model, whether it was wrapped or not
         if model is not self.model:
@@ -354,14 +346,11 @@ class CLTrainer(Trainer):
         # self.model_wrapped is DDP(Transformers Model), DDP(Deepspeed(Transformers Model)), etc.
 
         # Train!
-        if is_torch_tpu_available():
-            total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
-        else:
-            total_train_batch_size = (
-                self.args.train_batch_size
-                * self.args.gradient_accumulation_steps
-                * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
-            )
+        total_train_batch_size = (
+            self.args.train_batch_size
+            * self.args.gradient_accumulation_steps
+            * (torch.distributed.get_world_size() if self.args.local_rank != -1 and torch.distributed.is_initialized() else 1)
+        )
 
         num_examples = (
             self.num_examples(train_dataloader)
@@ -473,7 +462,7 @@ class CLTrainer(Trainer):
                     if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0 and not self.deepspeed:
                         # deepspeed does its own clipping
 
-                        if self.use_amp:
+                        if self.args.fp16:
                             # AMP: gradients need unscaling
                             self.scaler.unscale_(self.optimizer)
 
@@ -488,9 +477,7 @@ class CLTrainer(Trainer):
                             )
 
                     # Optimizer step
-                    if is_torch_tpu_available():
-                        xm.optimizer_step(self.optimizer)
-                    elif self.use_amp:
+                    if self.args.fp16:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                     else:
@@ -504,23 +491,14 @@ class CLTrainer(Trainer):
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
 
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
+                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch=epoch, ignore_keys_for_eval=None, start_time=start_time)
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
 
             self.control = self.callback_handler.on_epoch_end(self.args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
+            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch=epoch, ignore_keys_for_eval=None, start_time=start_time)
 
-            if self.args.tpu_metrics_debug or self.args.debug:
-                if is_torch_tpu_available():
-                    # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-                    xm.master_print(met.metrics_report())
-                else:
-                    logger.warning(
-                        "You enabled PyTorch/XLA debug metrics but you don't have a TPU "
-                        "configured. Check your training configuration if this is unexpected."
-                    )
             if self.control.should_training_stop:
                 break
 

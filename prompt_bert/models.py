@@ -141,17 +141,28 @@ def cl_forward(cls,
             #print(inputs_embeds[b,index][0].mean().item(), cls.p_mbv[i].mean().item())
             inputs_embeds[b, index] = cls.p_mbv[i]
 
-    outputs = encoder(
-        None if cls.model_args.mask_embedding_sentence_autoprompt else input_ids,
-        attention_mask=attention_mask,
-        token_type_ids=token_type_ids,
-        position_ids=position_ids,
-        head_mask=head_mask,
-        inputs_embeds=inputs_embeds,
-        output_attentions=output_attentions,
-        output_hidden_states=False,
-        return_dict=True,
-    )
+    if inputs_embeds is not None:
+        outputs = encoder(
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+    else:
+        outputs = encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=False,
+            return_dict=True,
+        )
 
 
     # Pooling
@@ -177,18 +188,14 @@ def cl_forward(cls,
                 pooler_output -= delta[blen]
 
         pooler_output = pooler_output.view(batch_size * num_sent, -1)
+        pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
 
-    #if cls.model_args.add_pseudo_instances:
-        #batch_size *= 2
-    pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
-
-    # If using "cls", we add an extra MLP layer
-    # (same as BERT's original implementation) over the representation.
-    if cls.model_args.mask_embedding_sentence_delta and cls.model_args.mask_embedding_sentence_org_mlp:
-        # ignore the delta and org
-        pass
+        # If using "cls", we add an extra MLP layer
+        # (same as BERT's original implementation) over the representation.
+        if not (cls.model_args.mask_embedding_sentence_delta and cls.model_args.mask_embedding_sentence_org_mlp):
+            pooler_output = cls.mlp(pooler_output)
     else:
-        pooler_output = cls.mlp(pooler_output)
+        raise ValueError("`mask_embedding_sentence` must be True. Otherwise, pooler_output is not defined.")
 
     # Separate representation
     z1, z2 = pooler_output[:,0], pooler_output[:,1]
@@ -442,7 +449,7 @@ class BertForCLCoOp(BertPreTrainedModel):
         # Route to contrastive or embedding forward
         if sent_emb:
             return sentemb_forward(self, self.bert,
-                                   input_ids=None,
+                                   input_ids=input_ids,
                                    attention_mask=attention_mask,
                                    token_type_ids=token_type_ids,
                                    position_ids=position_ids,
@@ -454,7 +461,7 @@ class BertForCLCoOp(BertPreTrainedModel):
                                    return_dict=return_dict)
         else:
             return cl_forward(self, self.bert,
-                              input_ids=None,
+                              input_ids=input_ids,
                               attention_mask=attention_mask,
                               token_type_ids=token_type_ids,
                               position_ids=position_ids,
@@ -478,6 +485,62 @@ class BertForCL(BertPreTrainedModel):
             )
 
         cl_init(self, config)
+
+    def forward(self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        sent_emb=False,
+    ):
+        if inputs_embeds is None:
+            batch_size, num_sent, seq_len = input_ids.size()
+            flat_ids = input_ids.view(-1, seq_len)
+            inputs_embeds = self.bert.embeddings.word_embeddings(flat_ids)
+
+            if getattr(self.model_args, 'use_coop', False) and hasattr(self, "prompt_embeddings"):
+                prompt = self.prompt_embeddings.unsqueeze(0).expand(
+                    batch_size * num_sent, -1, -1
+                )
+                inputs_embeds = torch.cat([prompt, inputs_embeds], dim=1)
+                flat_mask = attention_mask.view(-1, seq_len)
+                coop_mask = torch.ones(
+                    batch_size * num_sent, self.prompt_embeddings.size(0),
+                    device=flat_mask.device, dtype=flat_mask.dtype
+                )
+                attention_mask = torch.cat([coop_mask, flat_mask], dim=1)
+                token_type_ids = None
+
+        if sent_emb:
+            return sentemb_forward(self, self.bert,
+                                   input_ids=input_ids,
+                                   attention_mask=attention_mask,
+                                   token_type_ids=token_type_ids,
+                                   position_ids=position_ids,
+                                   head_mask=head_mask,
+                                   inputs_embeds=inputs_embeds,
+                                   labels=labels,
+                                   output_attentions=output_attentions,
+                                   output_hidden_states=output_hidden_states,
+                                   return_dict=return_dict)
+        else:
+            return cl_forward(self, self.bert,
+                              input_ids=input_ids,
+                              attention_mask=attention_mask,
+                              token_type_ids=token_type_ids,
+                              position_ids=position_ids,
+                              head_mask=head_mask,
+                              inputs_embeds=inputs_embeds,
+                              labels=labels,
+                              output_attentions=output_attentions,
+                              output_hidden_states=output_hidden_states,
+                              return_dict=return_dict)
 
 
 
