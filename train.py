@@ -34,7 +34,7 @@ from transformers import (
 from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTrainedTokenizerBase
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
-from transformers.file_utils import cached_property, is_torch_available, is_torch_tpu_available
+from transformers.file_utils import cached_property, is_torch_available
 from prompt_bert.models import RobertaForCL, BertForCL
 from prompt_bert.trainers import CLTrainer
 
@@ -424,7 +424,7 @@ class OurTrainingArguments(TrainingArguments):
         default=None, metadata={"help": "Whether or not to disable the tqdm progress bars."}
     )
     remove_unused_columns: bool = field(
-        default=True, metadata={"help": "Remove columns not required by the model when using an nlp.Dataset."}
+        default=False, metadata={"help": "Remove columns not required by the model when using an nlp.Dataset."}
     )
     greater_is_better: bool = field(
         default=True, metadata={"help": "Whether the `metric_for_best_model` should be maximized or not."}
@@ -439,9 +439,6 @@ class OurTrainingArguments(TrainingArguments):
         logger.info("PyTorch: setting up devices")
         if self.no_cuda:
             device = torch.device("cpu")
-            self._n_gpu = 0
-        elif is_torch_tpu_available():
-            device = xm.xla_device()
             self._n_gpu = 0
         elif self.local_rank == -1:
             # if n_gpu is > 1 we'll use nn.DataParallel.
@@ -479,6 +476,9 @@ class OurTrainingArguments(TrainingArguments):
             torch.cuda.set_device(device)
 
         return device
+    def __post_init__(self):
+        print("OurTrainingArguments __post_init__ called")
+        super().__post_init__()
 
 
 def main():
@@ -487,7 +487,7 @@ def main():
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, PromptArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, OurTrainingArguments, PromptArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         model_args, data_args, training_args, prompt_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
