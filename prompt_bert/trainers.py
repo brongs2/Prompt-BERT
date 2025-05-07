@@ -1,13 +1,25 @@
+def _model_unwrap(model):
+    while hasattr(model, "module"):
+        model = model.module
+    return model
+
 import collections
 import inspect
 import math
 import sys
 import os
+import warnings
+import numpy as np
+try:
+    import torch_xla.core.xla_model as xm
+    from transformers.trainer_utils import is_torch_tpu_available
+except ImportError:
+    def is_torch_tpu_available():
+        return False
 import re
 import json
 import shutil
 import time
-import warnings
 from pathlib import Path
 import importlib.util
 from packaging import version
@@ -76,7 +88,6 @@ PATH_TO_DATA = './SentEval/data'
 # Import SentEval
 sys.path.insert(0, PATH_TO_SENTEVAL)
 import senteval
-import numpy as np
 from datetime import datetime
 from filelock import FileLock
 
@@ -174,7 +185,13 @@ class CLTrainer(Trainer):
                 if self.sharded_dpp:
                     self.optimizer.consolidate_state_dict()
 
-                elif self.is_world_process_zero() and not self.deepspeed:
+                elif is_torch_tpu_available():
+                    xm.rendezvous("saving_optimizer_states")
+                    xm.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                    with warnings.catch_warnings(record=True) as caught_warnings:
+                        xm.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                    reissue_pt_warnings(caught_warnings)
+                elif self.is_world_process_zero() and not self.deepspeed and not is_torch_tpu_available():
                     # deepspeed.save_checkpoint above saves model/optim/sched
                     torch.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
                     with warnings.catch_warnings(record=True) as caught_warnings:
@@ -215,8 +232,8 @@ class CLTrainer(Trainer):
                 xm.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
                 with warnings.catch_warnings(record=True) as caught_warnings:
                     xm.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                    reissue_pt_warnings(caught_warnings)
-            elif self.is_world_process_zero() and not self.deepspeed:
+                reissue_pt_warnings(caught_warnings)
+            elif self.is_world_process_zero() and not self.deepspeed and not is_torch_tpu_available():
                 # deepspeed.save_checkpoint above saves model/optim/sched
                 torch.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
                 with warnings.catch_warnings(record=True) as caught_warnings:
@@ -491,26 +508,36 @@ class CLTrainer(Trainer):
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
 
+                    grad_norm = None
+                    if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
+                        parameters = [p for p in model.parameters() if p.grad is not None]
+                        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, self.args.max_grad_norm).item()
                     self._maybe_log_save_evaluate(
                         tr_loss=tr_loss,
                         model=model,
                         trial=trial,
                         epoch=epoch,
                         ignore_keys_for_eval=None,
-                        start_time=start_time
+                        start_time=start_time,
+                        grad_norm=grad_norm
                     )
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
 
             self.control = self.callback_handler.on_epoch_end(self.args, self.state, self.control)
+            grad_norm = None
+            if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
+                parameters = [p for p in model.parameters() if p.grad is not None]
+                grad_norm = torch.nn.utils.clip_grad_norm_(parameters, self.args.max_grad_norm).item()
             self._maybe_log_save_evaluate(
                 tr_loss=tr_loss,
                 model=model,
                 trial=trial,
                 epoch=epoch,
                 ignore_keys_for_eval=None,
-                start_time=start_time
+                start_time=start_time,
+                grad_norm=grad_norm
             )
 
             if self.control.should_training_stop:
