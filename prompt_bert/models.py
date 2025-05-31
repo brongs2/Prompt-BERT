@@ -168,7 +168,14 @@ def cl_forward(cls,
     # Pooling
     if cls.model_args.mask_embedding_sentence:
         last_hidden = outputs.last_hidden_state
-        pooler_output = last_hidden[input_ids == cls.mask_token_id]
+        # Patch: handle CoOp prompt tokens when selecting mask token positions
+        if cls.model_args.use_coop and cls.coop_length > 0:
+            prompt_len = cls.coop_length
+            mask = (input_ids == cls.mask_token_id)
+            mask = F.pad(mask, (prompt_len, 0), value=0)
+        else:
+            mask = (input_ids == cls.mask_token_id)
+        pooler_output = last_hidden[mask]
 
         if cls.model_args.mask_embedding_sentence_delta:
             if cls.model_args.mask_embedding_sentence_org_mlp:
@@ -367,7 +374,14 @@ def sentemb_forward(
 
     if cls.model_args.mask_embedding_sentence and hasattr(cls, 'bs'):
         last_hidden = outputs.last_hidden_state
-        pooler_output = last_hidden[input_ids == cls.mask_token_id]
+        # Patch: handle CoOp prompt tokens when selecting mask token positions
+        if cls.model_args.use_coop and cls.coop_length > 0:
+            prompt_len = cls.coop_length
+            mask = (input_ids == cls.mask_token_id)
+            mask = F.pad(mask, (prompt_len, 0), value=0)
+        else:
+            mask = (input_ids == cls.mask_token_id)
+        pooler_output = last_hidden[mask]
         if cls.model_args.mask_embedding_sentence_delta and not cls.model_args.mask_embedding_sentence_delta_no_delta_eval :
             blen = attention_mask.sum(-1) - template_len
             if cls.model_args.mask_embedding_sentence_org_mlp and not cls.model_args.mlp_only_train:
@@ -477,11 +491,12 @@ class BertForCL(BertPreTrainedModel):
     def __init__(self, config, *model_args, **model_kargs):
         super().__init__(config)
         self.model_args = model_kargs["model_args"]
+        self.coop_length = getattr(self.model_args, 'coop_length', 0)
         self.bert = BertModel(config)
 
         if self.model_args.use_coop:
             self.prompt_embeddings = nn.Parameter(
-                torch.randn(self.model_args.coop_length, config.hidden_size)
+                torch.randn(self.coop_length, config.hidden_size)
             )
 
         cl_init(self, config)
