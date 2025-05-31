@@ -75,6 +75,100 @@ def cl_forward(cls,
                labels=None,
                return_dict=None,
 ):
+    if not cls.model_args.mask_embedding_sentence:
+        if not cls.model_args.use_coop:
+            batch_size, num_sent, seq_len = input_ids.size()
+            input_ids_flat = input_ids.view(batch_size * num_sent, seq_len)
+            attention_mask_flat = attention_mask.view(batch_size * num_sent, -1)
+
+            outputs_enc = encoder(
+                input_ids=input_ids_flat,
+                attention_mask=attention_mask_flat,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+            pooler = outputs_enc.pooler_output  # (B*num_sent, H)
+            pooler = pooler.view(batch_size, num_sent, -1)  # (B, num_sent, H)
+        else:
+            outputs_enc = encoder(
+            attention_mask=attention_mask.view(-1, attention_mask.size(-1)),
+            inputs_embeds=inputs_embeds,   # 이미 (B*num_sent, coop_length+seq_len, H) 형태
+            output_hidden_states=False,
+            return_dict=True,
+        )
+            pooler = outputs_enc.pooler_output  # (B*num_sent, H)
+            batch_size, num_sent, _ = input_ids.size()
+            pooler = pooler.view(batch_size, num_sent, -1)
+        z1, z2 = pooler[:, 0], pooler[:, 1]
+        if num_sent == 3:
+            z3 = pooler[:, 2]
+
+        # If distributed, gather across GPUs
+        if dist.is_initialized() and cls.training:
+            # Hard negative gathering (if present)
+            if num_sent >= 3:
+                z3_list = [torch.zeros_like(z3) for _ in range(dist.get_world_size())]
+                dist.all_gather(tensor_list=z3_list, tensor=z3.contiguous())
+                z3_list[dist.get_rank()] = z3
+                z3 = torch.cat(z3_list, 0)
+
+            # Gather z1 & z2
+            z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
+            z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
+            dist.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
+            dist.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
+            z1_list[dist.get_rank()] = z1
+            z2_list[dist.get_rank()] = z2
+            z1 = torch.cat(z1_list, 0)
+            z2 = torch.cat(z2_list, 0)
+
+        # Compute pairwise similarity
+        if cls.model_args.dot_sim:
+            cos_sim = torch.mm(torch.sigmoid(z1), torch.sigmoid(z2.permute(1, 0)))
+        else:
+            cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+
+        # (Optional) renormalize instead of using temperature directly
+        if cls.model_args.norm_instead_temp:
+            cos_sim *= cls.sim.temp
+            cmin, cmax = cos_sim.min(), cos_sim.max()
+            cos_sim = (cos_sim - cmin) / (cmax - cmin) / cls.sim.temp
+
+        # If there is a hard negative, append its similarity
+        if num_sent >= 3:
+            z1_z3_cos = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
+            cos_sim = torch.cat([cos_sim, z1_z3_cos], 1)
+
+        # If using a hard-negative weight, add it to the logits
+        if num_sent == 3:
+            z3_weight = cls.model_args.hard_negative_weight
+            weights = torch.tensor(
+                [
+                    [0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1))
+                    + [0.0] * i
+                    + [z3_weight]
+                    + [0.0] * (z1_z3_cos.size(-1) - i - 1)
+                    for i in range(z1_z3_cos.size(-1))
+                ],
+                device=input_ids.device,
+            )
+            cos_sim = cos_sim + weights
+
+        # Contrastive loss
+        loss_fct = nn.CrossEntropyLoss()
+        labels_contrast = torch.arange(cos_sim.size(0), dtype=torch.long, device=input_ids.device)
+        loss = loss_fct(cos_sim, labels_contrast)
+
+        # If caller wants a tuple, return (loss, logits). Otherwise return SequenceClassifierOutput.
+        if not return_dict:
+            return (loss, cos_sim)
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=cos_sim,
+            hidden_states=outputs_enc.hidden_states if not cls.model_args.only_embedding_training else None,
+            attentions=outputs_enc.attentions if not cls.model_args.only_embedding_training else None,
+        )
+        
     def get_delta(template_token, length=50):
         with torch.set_grad_enabled(not cls.model_args.mask_embedding_sentence_delta_freeze):
             device = input_ids.device
@@ -201,9 +295,6 @@ def cl_forward(cls,
         # (same as BERT's original implementation) over the representation.
         if not (cls.model_args.mask_embedding_sentence_delta and cls.model_args.mask_embedding_sentence_org_mlp):
             pooler_output = cls.mlp(pooler_output)
-    else:
-        raise ValueError("`mask_embedding_sentence` must be True. Otherwise, pooler_output is not defined.")
-
     # Separate representation
     z1, z2 = pooler_output[:,0], pooler_output[:,1]
 

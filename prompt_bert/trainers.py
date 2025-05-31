@@ -576,3 +576,24 @@ class CLTrainer(Trainer):
         self._total_loss_scalar += tr_loss.item()
 
         return TrainOutput(self.state.global_step, self._total_loss_scalar / self.state.global_step, metrics)
+class CoOpTrainer(CLTrainer):
+    def compute_loss(self, model, inputs):
+        input_ids = inputs['input_ids']
+        attention_mask = inputs['attention_mask']
+        labels = inputs.get('labels', None)
+
+        # CoOp 모델의 forward는 prompt_embeddings를 내부에서 처리
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels
+        )
+
+        if isinstance(outputs, tuple):
+            loss = outputs[0]
+        elif hasattr(outputs, "loss"):
+            loss = outputs.loss
+        else:
+            raise ValueError("Model output does not contain loss")
+
+        return loss

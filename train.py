@@ -36,7 +36,7 @@ from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, is_torch_available
 from prompt_bert.models import RobertaForCL, BertForCL
-from prompt_bert.trainers import CLTrainer
+from prompt_bert.trainers import CLTrainer, CoOpTrainer
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -862,7 +862,13 @@ def main():
                 model.p_mbv.data.normal_(mean=0.0, std=0.02)
 
 
-    trainer = CLTrainer(
+    # Choose trainer class based on use_coop flag
+    if model_args.use_coop:
+        TrainerClass = CoOpTrainer
+    else:
+        TrainerClass = CLTrainer
+
+    trainer = TrainerClass(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
