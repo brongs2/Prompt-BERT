@@ -147,16 +147,8 @@ def main():
     if args.mask_embedding_sentence_delta:
         delta, template_len = get_delta(model, args.mask_embedding_sentence_template, tokenizer, device, args)
 
-    # Set up the tasks
-    #args.tasks = ['STS12', 'STS13', 'STS14', 'STS15', 'STS16', 'STSBenchmark', 'SICKRelatedness']
-    #args.tasks = ['MR']
-    if args.task_set == 'sts':
-        args.tasks = ['STS12', 'STS13', 'STS14', 'STS15', 'STS16', 'STSBenchmark', 'SICKRelatedness']
-    elif args.task_set == 'transfer':
-        args.tasks = ['MR', 'CR', 'MPQA', 'SUBJ', 'SST2', 'TREC', 'MRPC']
-    elif args.task_set == 'full':
-        args.tasks = ['STS12', 'STS13', 'STS14', 'STS15', 'STS16', 'STSBenchmark', 'SICKRelatedness']
-        args.tasks += ['MR', 'CR', 'MPQA', 'SUBJ', 'SST2', 'TREC', 'MRPC']
+    # Always only run STS tasks; skip transfer tasks entirely
+    args.tasks = ['STS12', 'STS13', 'STS14', 'STS15', 'STS16', 'STSBenchmark', 'SICKRelatedness']
 
     # Set params for SentEval
     if args.mode == 'dev' or args.mode == 'fasttest':
@@ -379,18 +371,6 @@ def main():
                 scores.append("0.00")
         print_table(task_names, scores)
 
-        task_names = []
-        scores = []
-        for task in ['MR', 'CR', 'SUBJ', 'MPQA', 'SST2', 'TREC', 'MRPC']:
-            task_names.append(task)
-            if task in results:
-                scores.append("%.2f" % (results[task]['devacc']))    
-            else:
-                scores.append("0.00")
-        task_names.append("Avg.")
-        scores.append("%.2f" % (sum([float(score) for score in scores]) / len(scores)))
-        print_table(task_names, scores)
-
     elif args.mode == 'test' or args.mode == 'fasttest':
         print("------ %s ------" % (args.mode))
 
@@ -403,18 +383,6 @@ def main():
                     scores.append("%.2f" % (results[task]['all']['spearman']['all'] * 100))
                 else:
                     scores.append("%.2f" % (results[task]['test']['spearman'].correlation * 100))
-            else:
-                scores.append("0.00")
-        task_names.append("Avg.")
-        scores.append("%.2f" % (sum([float(score) for score in scores]) / len(scores)))
-        print_table(task_names, scores)
-
-        task_names = []
-        scores = []
-        for task in ['MR', 'CR', 'SUBJ', 'MPQA', 'SST2', 'TREC', 'MRPC']:
-            task_names.append(task)
-            if task in results:
-                scores.append("%.2f" % (results[task]['acc']))
             else:
                 scores.append("0.00")
         task_names.append("Avg.")
