@@ -164,8 +164,7 @@ def cl_forward(cls,
             return_dict=True,
         )
 
-
-    # Pooling
+    # Pooling (applies to both branches)
     if cls.model_args.mask_embedding_sentence:
         last_hidden = outputs.last_hidden_state
         # Patch: handle CoOp prompt tokens when selecting mask token positions
@@ -195,15 +194,17 @@ def cl_forward(cls,
                 pooler_output -= delta[blen]
 
         pooler_output = pooler_output.view(batch_size * num_sent, -1)
-        pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
+        pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1)))  # (bs, num_sent, hidden)
 
         # If using "cls", we add an extra MLP layer
         # (same as BERT's original implementation) over the representation.
         if not (cls.model_args.mask_embedding_sentence_delta and cls.model_args.mask_embedding_sentence_org_mlp):
             pooler_output = cls.mlp(pooler_output)
     else:
-        raise ValueError("`mask_embedding_sentence` must be True. Otherwise, pooler_output is not defined.")
-
+        try:
+            pooler_output = outputs.pooler_output
+        except AttributeError:
+            pooler_output = outputs.last_hidden_state[:, 0, :]
     # Separate representation
     z1, z2 = pooler_output[:,0], pooler_output[:,1]
 
@@ -238,12 +239,8 @@ def cl_forward(cls,
     if cls.model_args.dot_sim:
         cos_sim = torch.mm(torch.sigmoid(z1), torch.sigmoid(z2.permute(1, 0)))
     else:
-        #if cls.model_args.mask_embedding_sentence_whole_vocab_cl:
-            #z1, z2 = torch.sigmoid(z1), torch.sigmoid(z2)
         cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-        #print(cos_sim)
-        #import pdb;pdb.set_trace()
-    # Hard negative
+    # Hard negative weight normalization
     if cls.model_args.norm_instead_temp:
         cos_sim *= cls.sim.temp
         cmin, cmax = cos_sim.min(), cos_sim.max()
@@ -251,7 +248,9 @@ def cl_forward(cls,
 
     if num_sent >= 3:
         z1_z3_cos = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
-        cos_sim = torch.cat([cos_sim, z1_z3_cos], 1)
+        # Ensure cos_sim and z1_z3_cos are 2D before concatenation
+        if cos_sim.dim() == 2 and z1_z3_cos.dim() == 2:
+            cos_sim = torch.cat([cos_sim, z1_z3_cos], dim=1)
 
     # print(cos_sim[cm].mean()*cls.model_args.temp, cos_sim[~cm].mean()*cls.model_args.temp)
     #import pdb;pdb.set_trace()
@@ -300,68 +299,34 @@ def sentemb_forward(
     output_hidden_states=None,
     return_dict=None,
 ):
-
-    if cls.model_args.mask_embedding_sentence_delta and not cls.model_args.mask_embedding_sentence_delta_no_delta_eval :
-        device = input_ids.device
-        d_input_ids = torch.Tensor([cls.mask_embedding_template]).repeat(128, 1).to(device).long()
-        d_position_ids = torch.arange(d_input_ids.shape[1]).to(device).unsqueeze(0).repeat(128, 1).long()
-        if not cls.model_args.mask_embedding_sentence_delta_no_position:
-            d_position_ids[:, len(cls.bs)+1:] += torch.arange(128).to(device).unsqueeze(-1)
-        m_mask = d_input_ids == cls.mask_token_id
-
-        with torch.no_grad():
-            outputs = encoder(input_ids=d_input_ids, position_ids=d_position_ids,  output_hidden_states=True, return_dict=True)
-            last_hidden = outputs.last_hidden_state
-            delta = last_hidden[m_mask]
-        delta.requires_grad = False
-        template_len = d_input_ids.shape[1]
-
+    # Simplified sent_emb forward: ignore mask_embedding functionality
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
 
-    if cls.model_args.mask_embedding_sentence and hasattr(cls, 'bs'):
-        new_input_ids = []
-        bs = torch.LongTensor(cls.bs).to(input_ids.device)
-        es = torch.LongTensor(cls.es).to(input_ids.device)
+    # Flatten input_ids and attention_mask if not using inputs_embeds
+    if inputs_embeds is None:
+        batch_size = input_ids.size(0)
+        num_sent = input_ids.size(1)
+        seq_len = input_ids.size(2)
+        flat_ids = input_ids.view(-1, seq_len)
+        flat_attn = attention_mask.view(-1, seq_len)
+        inputs_embeds = encoder.embeddings.word_embeddings(flat_ids)
+        # If CoOp is enabled, prepend prompt embeddings
+        if getattr(cls.model_args, 'use_coop', False) and cls.coop_length > 0:
+            coop_len = cls.coop_length
+            prompt_embeds = cls.prompt_embeddings.unsqueeze(0).expand(
+                batch_size * num_sent, -1, -1
+            )
+            inputs_embeds = torch.cat([prompt_embeds, inputs_embeds], dim=1)
+            coop_mask = torch.ones(
+                batch_size * num_sent, coop_len,
+                device=flat_attn.device, dtype=flat_attn.dtype
+            )
+            attention_mask = torch.cat([coop_mask, flat_attn], dim=1)
+            token_type_ids = None
 
-        for i in input_ids:
-            ss = i.shape[0]
-            d = i.device
-            ii = i[i != cls.pad_token_id]
-            ni = [ii[:1], bs]
-            if ii.shape[0] > 2:
-                ni += [ii[1:-1]]
-            ni += [es, ii[-1:]]
-            if ii.shape[0] < i.shape[0]:
-                ni += [i[i == cls.pad_token_id]]
-            ni = torch.cat(ni)
-            try:
-                assert ss + bs.shape[0] + es.shape[0] == ni.shape[0]
-            except:
-                print(ss + bs.shape[0] + es.shape[0])
-                print(ni.shape[0])
-                print(i.tolist())
-                print(ni.tolist())
-                assert 0
-
-            new_input_ids.append(ni)
-        input_ids = torch.stack(new_input_ids, dim=0)
-        attention_mask = (input_ids != cls.pad_token_id).long()
-        token_type_ids = None
-
-    if cls.model_args.mask_embedding_sentence_autoprompt:
-        inputs_embeds = encoder.embeddings.word_embeddings(input_ids)
-        with torch.no_grad():
-            p = torch.arange(input_ids.shape[1]).to(input_ids.device).view(1, -1)
-            b = torch.arange(input_ids.shape[0]).to(input_ids.device)
-            for i, k in enumerate(cls.dict_mbv):
-                if cls.fl_mbv[i]:
-                    index = ((input_ids == k) * p).max(-1)[1]
-                else:
-                    index = ((input_ids == k) * -p).min(-1)[1]
-                inputs_embeds[b, index] = cls.p_mbv[i]
-
+    # Pass through encoder using inputs_embeds (or input_ids if provided)
     outputs = encoder(
-        None if cls.model_args.mask_embedding_sentence_autoprompt else input_ids,
+        input_ids=None if inputs_embeds is not None else input_ids,
         attention_mask=attention_mask,
         token_type_ids=token_type_ids,
         position_ids=position_ids,
@@ -372,27 +337,14 @@ def sentemb_forward(
         return_dict=True,
     )
 
-    if cls.model_args.mask_embedding_sentence and hasattr(cls, 'bs'):
-        last_hidden = outputs.last_hidden_state
-        # Patch: handle CoOp prompt tokens when selecting mask token positions
-        if cls.model_args.use_coop and cls.coop_length > 0:
-            prompt_len = cls.coop_length
-            mask = (input_ids == cls.mask_token_id)
-            mask = F.pad(mask, (prompt_len, 0), value=0)
-        else:
-            mask = (input_ids == cls.mask_token_id)
-        pooler_output = last_hidden[mask]
-        if cls.model_args.mask_embedding_sentence_delta and not cls.model_args.mask_embedding_sentence_delta_no_delta_eval :
-            blen = attention_mask.sum(-1) - template_len
-            if cls.model_args.mask_embedding_sentence_org_mlp and not cls.model_args.mlp_only_train:
-                pooler_output, delta = cls.mlp(pooler_output), cls.mlp(delta)
-            pooler_output -= delta[blen]
+    # Extract pooler output (fallback to CLS hidden state if necessary)
+    try:
+        pooler_output = outputs.pooler_output
+    except AttributeError:
+        pooler_output = outputs.last_hidden_state[:, 0, :]
 
-        if cls.model_args.mask_embedding_sentence_avg:
-            pooler_output = pooler_output.view(input_ids.shape[0], -1)
-        else:
-            pooler_output = pooler_output.view(input_ids.shape[0], -1, pooler_output.shape[-1]).mean(1)
-    if not cls.model_args.mlp_only_train and not cls.model_args.mask_embedding_sentence_org_mlp:
+    # Apply MLP head unless only_embedding_training
+    if not cls.model_args.mlp_only_train:
         pooler_output = cls.mlp(pooler_output)
 
     if not return_dict:

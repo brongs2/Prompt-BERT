@@ -35,7 +35,7 @@ from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy,
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, is_torch_available
-from prompt_bert.models import RobertaForCL, BertForCL
+from prompt_bert.models import RobertaForCL, BertForCL, BertForCLCoOp
 from prompt_bert.trainers import CLTrainer
 
 logger = logging.getLogger(__name__)
@@ -607,15 +607,27 @@ def main():
             )
 
         elif 'bert' in model_args.model_name_or_path:
-            model = BertForCL.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args
-            )
+            # CoOp 모드면 BertForCLCoOp, 그렇지 않으면 BertForCL 사용
+            if model_args.use_coop:
+                model = BertForCLCoOp.from_pretrained(
+                    model_args.model_name_or_path,
+                    from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                    config=config,
+                    cache_dir=model_args.cache_dir,
+                    revision=model_args.model_revision,
+                    use_auth_token=True if model_args.use_auth_token else None,
+                    model_args=model_args
+                )
+            else:
+                model = BertForCL.from_pretrained(
+                    model_args.model_name_or_path,
+                    from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                    config=config,
+                    cache_dir=model_args.cache_dir,
+                    revision=model_args.model_revision,
+                    use_auth_token=True if model_args.use_auth_token else None,
+                    model_args=model_args
+                )
             if model_args.mask_embedding_sentence_org_mlp:
                 from transformers import BertForMaskedLM, BertConfig
                 config = BertConfig.from_pretrained(model_args.model_name_or_path)
@@ -720,14 +732,15 @@ def main():
 
             sent_features = {'input_ids': [], 'attention_mask': []}
             for i, s in enumerate(sentences):
+                max_text_len = data_args.max_seq_length - (model_args.coop_length if model_args.use_coop else 0)
                 if i < total:
-                    s = tokenizer.encode(s, add_special_tokens=False)[:data_args.max_seq_length]
+                    s = tokenizer.encode(s, add_special_tokens=False)[:max_text_len]
                     sent_features['input_ids'].append(bs+s+es)
                 elif i < 2*total:
-                    s = tokenizer.encode(s, add_special_tokens=False)[:data_args.max_seq_length]
+                    s = tokenizer.encode(s, add_special_tokens=False)[:max_text_len]
                     sent_features['input_ids'].append(bs2+s+es2)
                 else:
-                    s = tokenizer.encode(s, add_special_tokens=False)[:data_args.max_seq_length]
+                    s = tokenizer.encode(s, add_special_tokens=False)[:max_text_len]
                     sent_features['input_ids'].append(bs2+s+es2)
 
             ml = max([len(i) for i in sent_features['input_ids']])
@@ -736,9 +749,10 @@ def main():
                 sent_features['input_ids'][i] = t + [tokenizer.pad_token_id]*(ml-len(t))
                 sent_features['attention_mask'].append(len(t)*[1] + (ml-len(t))*[0])
         else:
+            max_text_len = data_args.max_seq_length - (model_args.coop_length if model_args.use_coop else 0)
             sent_features = tokenizer(
                 sentences,
-                max_length=data_args.max_seq_length,
+                max_length=max_text_len,
                 truncation=True,
                 padding="max_length" if data_args.pad_to_max_length else False,
             )
@@ -762,7 +776,6 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
         )
 
-
     # Data collator
     @dataclass
     class OurDataCollatorWithPadding:
@@ -775,7 +788,6 @@ def main():
         mlm_probability: float = data_args.mlm_probability
 
         def __call__(self, features: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-
             special_keys = ['input_ids', 'attention_mask', 'token_type_ids']
             bs = len(features)
             if bs > 0:
@@ -787,16 +799,17 @@ def main():
                 for i in range(num_sent):
                     flat_features.append({k: feature[k][i] if k in special_keys else feature[k] for k in feature})
 
+            # Always pad flat inputs up to the original max_seq_length (text length)
+            target_length = data_args.max_seq_length - (model_args.coop_length if model_args.use_coop else 0)
             batch = self.tokenizer.pad(
                 flat_features,
-                padding=self.padding,
-                max_length=self.max_length,
+                padding="max_length",
+                max_length=target_length,
                 pad_to_multiple_of=self.pad_to_multiple_of,
                 return_tensors="pt",
             )
 
-            batch = {k: batch[k].view(bs, num_sent, -1) if k in special_keys else batch[k].view(bs, num_sent, -1)[:, 0] for k in batch}
-
+            batch = {k: batch[k].view(bs, num_sent, target_length) if k in special_keys else batch[k].view(bs, num_sent, target_length)[:, 0] for k in batch}
 
             if "label" in batch:
                 batch["labels"] = batch["label"]
@@ -806,8 +819,10 @@ def main():
                 del batch["label_ids"]
 
             return batch
-        
 
+    # If using CoOp, always pad text inputs to a fixed length (max_text + coop_length)
+    if model_args.use_coop:
+        data_args.pad_to_max_length = True
     data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
 
     # setup for wandb
