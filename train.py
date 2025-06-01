@@ -864,8 +864,10 @@ def main():
 
     # Choose trainer class based on use_coop flag
     if model_args.use_coop:
+        print("Using CoOpTrainer")
         TrainerClass = CoOpTrainer
     else:
+        print("Using CLTrainer")
         TrainerClass = CLTrainer
 
     trainer = TrainerClass(

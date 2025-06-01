@@ -577,7 +577,7 @@ class CLTrainer(Trainer):
 
         return TrainOutput(self.state.global_step, self._total_loss_scalar / self.state.global_step, metrics)
 class CoOpTrainer(CLTrainer):
-    def compute_loss(self, model, inputs):
+    def compute_loss(self, model, inputs, num_items_in_batch=None):
         input_ids = inputs['input_ids']
         attention_mask = inputs['attention_mask']
         labels = inputs.get('labels', None)
