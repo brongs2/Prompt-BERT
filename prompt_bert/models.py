@@ -93,7 +93,7 @@ def cl_forward(cls,
             # [DEBUG] Print input shapes and expected sequence length for CoOp branch
             batch_size, num_sent, seq_len = input_ids.size()
             expected_len = cls.coop_length + seq_len
-            print(f"[DEBUG cl_forward - CoOp] inputs_embeds.shape: {inputs_embeds.shape}, attention_mask.shape: {attention_mask.shape}, expected sequence length: {expected_len}")
+            # print(f"[DEBUG cl_forward - CoOp] inputs_embeds.shape: {inputs_embeds.shape}, attention_mask.shape: {attention_mask.shape}, expected sequence length: {expected_len}")
             assert inputs_embeds.shape[1] == expected_len, f"CoOp inputs_embeds length {inputs_embeds.shape[1]} != expected {expected_len}"
             assert attention_mask.shape[1] == expected_len, f"CoOp attention_mask length {attention_mask.shape[1]} != expected {expected_len}"
             outputs_enc = encoder(
@@ -128,43 +128,18 @@ def cl_forward(cls,
             z2_list[dist.get_rank()] = z2
             z1 = torch.cat(z1_list, 0)
             z2 = torch.cat(z2_list, 0)
-        # cos_sim 계산 바로 전
-        print(f"[DEBUG] z1[:2] =\n{z1[:2]}")
-        print(f"[DEBUG] z2[:2] =\n{z2[:2]}")
-        print(f"[DEBUG] any NaN in z1? {torch.isnan(z1).any().item()}")
-        print(f"[DEBUG] any NaN in z2? {torch.isnan(z2).any().item()}")
+        # ---- compact debug (prints once) ---------------------------------
+        if not hasattr(cls, "_dbg_printed"):
+            print("[DEBUG] NaN?  z1:", torch.isnan(z1).any().item(),
+                  " z2:", torch.isnan(z2).any().item(),
+                  " cos_sim:", torch.isnan(cos_sim if 'cos_sim' in locals() else z1).any().item())
+            cls._dbg_printed = True
+        # ------------------------------------------------------------------
         # Compute pairwise similarity
         if cls.model_args.dot_sim:
             cos_sim = torch.mm(torch.sigmoid(z1), torch.sigmoid(z2.permute(1, 0)))
         else:
             cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-            # (디버그 코드) cos_sim, labels_contrast 점검
-        # -------------------------------------------
-        # cos_sim의 크기와 NaN/Inf 여부, labels_contrast의 인덱스 범위를 출력해 봅니다.
-        batch_size = z1.size(0)
-        labels_contrast = torch.arange(batch_size, dtype=torch.long, device=cos_sim.device)
-
-        # 1) cos_sim shape 확인
-        print(f"[DEBUG] cos_sim.shape: {cos_sim.shape}")  
-        #    -> 기대: (batch_size, batch_size) 형태여야 함
-
-        # 2) cos_sim 내 NaN 또는 Inf 존재 여부
-        nan_mask = torch.isnan(cos_sim)
-        inf_mask = torch.isinf(cos_sim)
-        print(f"[DEBUG] any NaN in cos_sim? {nan_mask.any().item()}")  
-        print(f"[DEBUG] any +Inf or -Inf in cos_sim? {inf_mask.any().item()}")
-
-        # 3) cos_sim의 앞 몇 개 원소 출력 (값 범위 확인)
-        #    너무 많은 로그가 찍히면 일부만 슬라이싱해 출력하세요.
-        print(f"[DEBUG] cos_sim[:2, :2] =\n{cos_sim[:2, :2]}")
-
-        # 4) labels_contrast의 크기와 최대/최소값 확인
-        print(f"[DEBUG] labels_contrast.shape: {labels_contrast.shape}")
-        print(f"[DEBUG] labels_contrast: min={labels_contrast.min().item()}, max={labels_contrast.max().item()}")
-
-        # 5) CrossEntropyLoss 직전에 cos_sim과 labels_contrast의 device, dtype 일치 여부
-        print(f"[DEBUG] cos_sim.device={cos_sim.device}, labels_contrast.device={labels_contrast.device}")
-        print(f"[DEBUG] cos_sim.dtype={cos_sim.dtype}, labels_contrast.dtype={labels_contrast.dtype}")
         # (Optional) renormalize instead of using temperature directly
         if cls.model_args.norm_instead_temp:
             cos_sim *= cls.sim.temp
@@ -547,7 +522,7 @@ class BertForCLCoOp(BertPreTrainedModel):
         if self.model_args.use_coop and self.coop_length > 0:
             # (coop_length, hidden_size)
             self.prompt_embeddings = nn.Parameter(
-                torch.randn(self.coop_length, config.hidden_size)
+                torch.empty(self.coop_length, config.hidden_size).normal_(mean=0.0, std=config.initializer_range) 
             )
         # initialize contrastive head
         cl_init(self, config)
@@ -585,6 +560,10 @@ class BertForCLCoOp(BertPreTrainedModel):
                     batch_size * num_sent, self.coop_length,
                     device=flat_mask.device, dtype=flat_mask.dtype
                 )
+                # AFTER ① : 빈 문장 방지용 가드
+                flat_mask[flat_mask.sum(-1) == 0, 0] = 1     # 첫 토큰만 강제로 1
+
+                # AFTER ② : prompt mask concat
                 attention_mask = torch.cat([coop_mask, flat_mask], dim=1)
                 token_type_ids = None  # or handle similarly if needed
 
