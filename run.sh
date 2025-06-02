@@ -9,15 +9,15 @@ TRAIN_FILE=data/wiki1m_for_simcse.txt
 if [[ $EXP == *"eval"* ]]; then
       EXP=`echo $EXP | sed s/eval-//`
       EVAL_ONLY=true
-elif [[ $EXP == *"-static-embedding"* ]]; then
+elif [[ $EXP == *"-static-embedding" ]]; then
       CHECKPOINT=`echo $EXP | sed s/-static-embedding//`
       EXP=static-embedding
-elif [[ $EXP == *"-static-embedding-remove-baises"* ]]; then
+elif [[ $EXP == *"-static-embedding-remove-baises" ]]; then
       CHECKPOINT=`echo $EXP | sed s/-static-embedding-remove-baises//`
       EXP=static-embedding-remove-baises
 else
       EVAL_ONLY=false
-fi
+ fi
 
 if [[ $EXP == "calc-anisotropy-"* ]]; then
     EXP=`echo $EXP | sed s/calc-anisotropy-//`
@@ -34,33 +34,25 @@ case "$EXP" in
 "roberta-base" | "bert-base-uncased" | "bert-base-cased")
   EVAL_ONLY=true
   CHECKPOINT=$EXP
-  ;;
+    ;;
 "static-embedding")
   EVAL_ONLY=true
   eargs=(--embedding_only)
-  ;;
+    ;;
 "static-embedding-remove-baises")
   EVAL_ONLY=true
-  eargs=(--remove_continue_word \
+  eargs=(--remove_continue_word\
          --embedding_only)
-  ;;
+    ;;
 "bert-prompt")
+#| STS12 | STS13 | STS14 | STS15 | STS16 | STSBenchmark | SICKRelatedness |  Avg. |
+#| 60.96 | 73.83 | 62.18 | 71.54 | 68.68 |    70.60     |      67.16      | 67.85 |
   EVAL_ONLY=true
   CHECKPOINT=bert-base-uncased
   TEMPLATE="*cls*_This_sentence_:_\"*sent_0*\"_means*mask*.*sep+*"
   eargs=(--mask_embedding_sentence \
          --mask_embedding_sentence_template $TEMPLATE )
-  ;;
-"coop-bert")
-  EVAL_ONLY=true
-  CHECKPOINT=bert-base-uncased
-  TEMPLATE="*cls*_This_sentence_:_\"*sent_0*\"_means*mask*.*sep+*"
-  args=(--use_coop \
-        --coop_length 10 )
-  eargs=(--use_coop \
-         --coop_length 10 \
-         --mask_embedding_sentence_template $TEMPLATE )
-  ;;
+    ;;
 "bert-optiprompt")
     BC=(python train.py)
     GPU=$2
@@ -70,7 +62,7 @@ case "$EXP" in
     EPOCH=5
     TEMPLATE="*cls*_This_sentence_:_\"*sent_0*\"_means*mask*.*sep+*"
     MODEL=bert-base-uncased
-    args=(--mlp_only_train --mask_embedding_sentence \
+    args=(--mlp_only_train --mask_embedding_sentence\
           --mask_embedding_sentence_template $TEMPLATE\
           --mask_embedding_sentence_autoprompt\
           --mask_embedding_sentence_org_mlp)
@@ -147,6 +139,7 @@ case "$EXP" in
            --mask_embedding_sentence \
            --mask_embedding_sentence_template $TEMPLATE )
     ;;
+*)
 esac
 
 if [ -z "$GPU" ]; then
@@ -180,6 +173,7 @@ else
 fi
 
 if [[ $EXP == "sup"* ]]; then
+        # rewrite key for supervised model
   python <<EOF
 import argparse
 import torch
@@ -214,7 +208,7 @@ if [[ $CALC_ANISOTROPY == true ]]; then
       ${eargs[@]}
 else
   CUDA_VISIBLE_DEVICES=$GPU python evaluation.py \
-    --model_name_or_path $CHECKPOINT \
+    --model_name_or_path   $CHECKPOINT \
     --pooler avg\
     --mode test\
     ${eargs[@]}
