@@ -12,10 +12,10 @@ To evaluate the models:
 bash eval_only.sh [unsup-bert|sup-bert]
 ```
 ### Setup
-'''sh
+```sh
 bash git clone -b temp https://github.com/brongs2/CoOp-BERT.git
-'''
-'''sh
+```
+```sh
 bash cd CoOp-BERT
 cd SentEval/data/downstream/
 bash download_dataset.sh
@@ -42,7 +42,7 @@ with open(file_path, "w") as f:
         f.write(line)
 
 print("sts modified")
-'''
+```
 
 
 ### Train with CoOp
