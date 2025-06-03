@@ -11,6 +11,39 @@ To evaluate the models:
 ```sh
 bash eval_only.sh [unsup-bert|sup-bert]
 ```
+### Setup
+'''sh
+bash git clone -b temp https://github.com/brongs2/CoOp-BERT.git
+'''
+'''sh
+bash cd CoOp-BERT
+cd SentEval/data/downstream/
+bash download_dataset.sh
+cd -
+cd ./data
+bash download_wiki.sh
+bash download_nli.sh
+cd -
+file_path = "/content/CoOp-BERT/SentEval/senteval/sts.py"
+
+with open(file_path, "r") as f:
+    lines = f.readlines()
+
+with open(file_path, "w") as f:
+    for line in lines:
+        line = line.replace(
+            'np.array([s.split() for s in sent1])[not_empty_idx]',
+            '[s.split() for i, s in enumerate(sent1) if not_empty_idx[i]]'
+        )
+        line = line.replace(
+            'np.array([s.split() for s in sent2])[not_empty_idx]',
+            '[s.split() for i, s in enumerate(sent2) if not_empty_idx[i]]'
+        )
+        f.write(line)
+
+print("sts modified")
+'''
+
 
 ### Train with CoOp
 
