@@ -13,7 +13,7 @@ bash eval_only.sh [unsup-bert|sup-bert]
 ```
 ### Setup
 ```sh
-bash git clone -b temp https://github.com/brongs2/CoOp-BERT.git
+git clone -b temp https://github.com/brongs2/CoOp-BERT.git
 ```
 ```sh
 bash cd CoOp-BERT
