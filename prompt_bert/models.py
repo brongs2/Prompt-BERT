@@ -75,6 +75,7 @@ def cl_forward(cls,
                labels=None,
                return_dict=None,
 ):
+    
     if not cls.model_args.mask_embedding_sentence:
         if not cls.model_args.use_coop:
             batch_size, num_sent, seq_len = input_ids.size()
@@ -90,12 +91,29 @@ def cl_forward(cls,
             pooler = outputs_enc.pooler_output  # (B*num_sent, H)
             pooler = pooler.view(batch_size, num_sent, -1)  # (B, num_sent, H)
         else:
+            # print("use coop")
             # [DEBUG] Print input shapes and expected sequence length for CoOp branch
             batch_size, num_sent, seq_len = input_ids.size()
             expected_len = cls.coop_length + seq_len
-            # print(f"[DEBUG cl_forward - CoOp] inputs_embeds.shape: {inputs_embeds.shape}, attention_mask.shape: {attention_mask.shape}, expected sequence length: {expected_len}")
+            # —————————————— 디버그 시작 ——————————————
+            # inputs_embeds와 attention_mask가 NaN을 포함하는지 확인
+            # if torch.isnan(inputs_embeds).any():
+            #     print("[DEBUG cl_forward] ⚠️ inputs_embeds contains NaN BEFORE encoder")
+            # else:
+            #     print("[DEBUG cl_forward] inputs_embeds OK (no NaN) BEFORE encoder")
+
+            # if torch.isnan(attention_mask).any():
+            #     print("[DEBUG cl_forward] ⚠️ attention_mask contains NaN BEFORE encoder")
+            # else:
+            #     print("[DEBUG cl_forward] attention_mask OK (no NaN) BEFORE encoder")
+
+            # # inputs_embeds의 일부 값을 샘플링해서 찍어 보기 (예: 첫 문장 첫 토큰)
+            # print("[DEBUG cl_forward] inputs_embeds[0, :5, :5] =", inputs_embeds[0, :5, :5])
+            # print("[DEBUG cl_forward] attention_mask[0, :10] =", attention_mask.view(-1)[0:10])
+           # —————————————— 디버그 끝 ——————————————
             assert inputs_embeds.shape[1] == expected_len, f"CoOp inputs_embeds length {inputs_embeds.shape[1]} != expected {expected_len}"
             assert attention_mask.shape[1] == expected_len, f"CoOp attention_mask length {attention_mask.shape[1]} != expected {expected_len}"
+            # print(encoder)
             outputs_enc = encoder(
                 attention_mask=attention_mask.view(-1, attention_mask.size(-1)),
                 inputs_embeds=inputs_embeds,   # 이미 (B*num_sent, coop_length+seq_len, H) 형태
@@ -103,6 +121,7 @@ def cl_forward(cls,
                 return_dict=True,
             )
             pooler = outputs_enc.pooler_output  # (B*num_sent, H)
+            # print("pooler= ", pooler)
             batch_size, num_sent, _ = input_ids.size()
             pooler = pooler.view(batch_size, num_sent, -1)
             
@@ -517,17 +536,21 @@ class BertForCLCoOp(BertPreTrainedModel):
         super().__init__(config)
         self.model_args = model_kargs["model_args"]
         self.bert = BertModel(config)
-        # CoOp: learnable prompt embeddings
-        for param in self.bert.parameters():
-            param.requires_grad = False
+        # print("[DEBUG] config.initializer_range =", config.initializer_range)
+        # 1) __init__에서 프롬프트 임베딩을 생성하며 곧바로 GPU로 이동
         self.coop_length = getattr(self.model_args, 'coop_length', 0)
         if self.model_args.use_coop and self.coop_length > 0:
-            # (coop_length, hidden_size)
-            self.prompt_embeddings = nn.Parameter(
-                torch.empty(self.coop_length, config.hidden_size).normal_(mean=0.0, std=config.initializer_range) 
-            )
-        # initialize contrastive head
+            # config.initializer_range를 사용해서 한 번만 초기화
+            init_tensor = torch.randn(self.coop_length, config.hidden_size) * 0.02
+            self.prompt_embeddings = nn.Parameter(init_tensor)
+        else:
+            self.prompt_embeddings = None
+
+        # 2) contrastive head 초기화 (masking 등 필요한 분기 포함)
         cl_init(self, config)
+
+        # 3) 전체 모델을 GPU로 옮길 때 prompt_embeddings도 함께 GPU로 가도록 설정
+        #    Trainer가 model.to(device)를 호출하면 자동으로 처리됨
 
     def forward(self,
         input_ids=None,
@@ -542,34 +565,48 @@ class BertForCLCoOp(BertPreTrainedModel):
         return_dict=None,
         sent_emb=False,
     ):
-        # Prepare CoOp embeddings if enabled
-        print(f"[DEBUG] inputs_embeds: {inputs_embeds}")
+        # ----------------------------------------------------------------
+        # 4) forward 초반에 “prompt_embeddings 디바이스 보장” 코드 추가
+        if self.model_args.use_coop and self.prompt_embeddings is not None:
+            # inputs_embeds가 None이면 아직 BERT 임베딩을 못 얻은 상태인데, 
+            # 그때는 “입력 아이디 기반으로 임베딩을 만든 뒤”에 디바이스를 통일할 것이므로, 여기서는 패스
+            pass
+
+        # print(f"[DEBUG] inputs_embeds(초기 인자): {inputs_embeds}")  # inputs_embeds가 None 혹은 외부에서 들어왔는지 확인
 
         if inputs_embeds is None:
             # Flatten input_ids: (batch_size * num_sent, seq_len)
             batch_size, num_sent, seq_len = input_ids.size()
             flat_ids = input_ids.view(-1, seq_len)
-            inputs_embeds = self.bert.embeddings.word_embeddings(flat_ids)
 
-            if getattr(self.model_args, 'use_coop', False) and self.coop_length > 0:
-                # Expand prompt: (batch_size * num_sent, coop_length, hidden)
+            # 5) BERT token embedding 생성: 이 텐서는 (B*num_sent, seq_len, H) 형태로 GPU 위에 생성됨
+            inputs_embeds = self.bert.embeddings.word_embeddings(flat_ids).to(flat_ids.device)
+            # print(f"[DEBUG] inputs_embeds(벡터 생성 후) : {inputs_embeds.shape}")
+
+            if self.model_args.use_coop and self.coop_length > 0:
+                # 6) 이 시점에서 prompt_embeddings가 GPU로 올라와 있지 않다면 강제 이동
+                if self.prompt_embeddings.device != inputs_embeds.device:
+                    # 원본 파라미터 자체를 GPU로 옮기고 다시 래핑
+                    self.prompt_embeddings = nn.Parameter(self.prompt_embeddings.data.to(inputs_embeds.device))
+
+                # 7) 이제 prompt 임베딩을 (B*num_sent, coop_length, H)로 expand
                 prompt = self.prompt_embeddings.unsqueeze(0).expand(
                     batch_size * num_sent, -1, -1
                 )
-                # Concatenate prompt + original embeddings
+                # 8) prompt + 원래 임베딩을 결합
                 inputs_embeds = torch.cat([prompt, inputs_embeds], dim=1)
-                # Adjust attention mask
+                # print(f"[DEBUG] inputs_embeds(프롬프트 합친 후) : {inputs_embeds.shape}")
+
+                # 9) attention_mask도 대응해서 확장
                 flat_mask = attention_mask.view(-1, seq_len)
                 coop_mask = torch.ones(
                     batch_size * num_sent, self.coop_length,
-                    device=flat_mask.device, dtype=flat_mask.dtype
+                    device=inputs_embeds.device, dtype=flat_mask.dtype
                 )
-                # AFTER ① : 빈 문장 방지용 가드
-                flat_mask[flat_mask.sum(-1) == 0, 0] = 1     # 첫 토큰만 강제로 1
-
-                # AFTER ② : prompt mask concat
+                # 빈 문장 방지
+                flat_mask[flat_mask.sum(-1) == 0, 0] = 1
                 attention_mask = torch.cat([coop_mask, flat_mask], dim=1)
-                token_type_ids = None  # or handle similarly if needed
+                token_type_ids = None
 
         # Route to contrastive or embedding forward
         if sent_emb:
