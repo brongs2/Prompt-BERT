@@ -91,40 +91,25 @@ def cl_forward(cls,
             pooler = outputs_enc.pooler_output  # (B*num_sent, H)
             pooler = pooler.view(batch_size, num_sent, -1)  # (B, num_sent, H)
         else:
-            # print("use coop")
-            # [DEBUG] Print input shapes and expected sequence length for CoOp branch
+            # CoOp branch: use average pooling over all tokens, including prompt tokens
             batch_size, num_sent, seq_len = input_ids.size()
             expected_len = cls.coop_length + seq_len
-            # —————————————— 디버그 시작 ——————————————
-            # inputs_embeds와 attention_mask가 NaN을 포함하는지 확인
-            # if torch.isnan(inputs_embeds).any():
-            #     print("[DEBUG cl_forward] ⚠️ inputs_embeds contains NaN BEFORE encoder")
-            # else:
-            #     print("[DEBUG cl_forward] inputs_embeds OK (no NaN) BEFORE encoder")
-
-            # if torch.isnan(attention_mask).any():
-            #     print("[DEBUG cl_forward] ⚠️ attention_mask contains NaN BEFORE encoder")
-            # else:
-            #     print("[DEBUG cl_forward] attention_mask OK (no NaN) BEFORE encoder")
-
-            # # inputs_embeds의 일부 값을 샘플링해서 찍어 보기 (예: 첫 문장 첫 토큰)
-            # print("[DEBUG cl_forward] inputs_embeds[0, :5, :5] =", inputs_embeds[0, :5, :5])
-            # print("[DEBUG cl_forward] attention_mask[0, :10] =", attention_mask.view(-1)[0:10])
-           # —————————————— 디버그 끝 ——————————————
             assert inputs_embeds.shape[1] == expected_len, f"CoOp inputs_embeds length {inputs_embeds.shape[1]} != expected {expected_len}"
             assert attention_mask.shape[1] == expected_len, f"CoOp attention_mask length {attention_mask.shape[1]} != expected {expected_len}"
-            # print(encoder)
             outputs_enc = encoder(
                 attention_mask=attention_mask.view(-1, attention_mask.size(-1)),
-                inputs_embeds=inputs_embeds,   # 이미 (B*num_sent, coop_length+seq_len, H) 형태
+                inputs_embeds=inputs_embeds,   # already (B*num_sent, coop_length+seq_len, H)
                 output_hidden_states=False,
                 return_dict=True,
             )
-            pooler = outputs_enc.pooler_output  # (B*num_sent, H)
-            # print("pooler= ", pooler)
-            batch_size, num_sent, _ = input_ids.size()
-            pooler = pooler.view(batch_size, num_sent, -1)
-            
+            last_hidden = outputs_enc.last_hidden_state  # (B*num_sent, coop_length+seq_len, H)
+            # Use attention_mask directly as mask (includes prompt tokens)
+            mask = attention_mask  # shape: (B*num_sent, coop_length+seq_len)
+            mask = mask.float()
+            # Compute average pooling over all tokens (including prompt tokens)
+            pooled = (last_hidden * mask.unsqueeze(-1)).sum(1) / mask.sum(-1).unsqueeze(-1)
+            pooler = pooled.view(batch_size, num_sent, -1)
+
         z1, z2 = pooler[:, 0], pooler[:, 1]
         if num_sent == 3:
             z3 = pooler[:, 2]

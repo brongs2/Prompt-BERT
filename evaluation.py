@@ -319,7 +319,12 @@ def main():
                 r += last_hidden[index2, index[:, i], :]
             return (r/3).cpu()
         elif args.pooler == "avg":
-            return ((last_hidden * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)).cpu()
+            # Exclude prompt tokens from avg pooling if using CoOp
+            mask = batch['attention_mask'].clone()
+            if args.use_coop and args.coop_length > 0:
+                mask[:, :args.coop_length] = 0
+            pooled = (last_hidden * mask.unsqueeze(-1)).sum(1) / mask.sum(-1).unsqueeze(-1)
+            return pooled.cpu()
         elif args.pooler == "avg_first_last":
             first_hidden = hidden_states[0]
             last_hidden = hidden_states[-1]
