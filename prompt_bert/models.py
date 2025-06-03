@@ -518,6 +518,8 @@ class BertForCLCoOp(BertPreTrainedModel):
         self.model_args = model_kargs["model_args"]
         self.bert = BertModel(config)
         # CoOp: learnable prompt embeddings
+        for param in self.bert.parameters():
+            param.requires_grad = False
         self.coop_length = getattr(self.model_args, 'coop_length', 0)
         if self.model_args.use_coop and self.coop_length > 0:
             # (coop_length, hidden_size)
@@ -541,6 +543,8 @@ class BertForCLCoOp(BertPreTrainedModel):
         sent_emb=False,
     ):
         # Prepare CoOp embeddings if enabled
+        print(f"[DEBUG] inputs_embeds: {inputs_embeds}")
+
         if inputs_embeds is None:
             # Flatten input_ids: (batch_size * num_sent, seq_len)
             batch_size, num_sent, seq_len = input_ids.size()

@@ -35,7 +35,7 @@ from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy,
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, is_torch_available
-from prompt_bert.models import RobertaForCL, BertForCL
+from prompt_bert.models import RobertaForCL, BertForCL, BertForCLCoOp
 from prompt_bert.trainers import CLTrainer, CoOpTrainer
 
 logger = logging.getLogger(__name__)
@@ -607,19 +607,26 @@ def main():
             )
 
         elif 'bert' in model_args.model_name_or_path:
-            model = BertForCL.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args
-            )
-            if model_args.mask_embedding_sentence_org_mlp:
-                from transformers import BertForMaskedLM, BertConfig
-                config = BertConfig.from_pretrained(model_args.model_name_or_path)
-                model.mlp = BertForMaskedLM.from_pretrained(model_args.model_name_or_path, config=config).cls.predictions.transform
+                    if model_args.use_coop:
+                        model = BertForCLCoOp.from_pretrained(
+                            model_args.model_name_or_path,
+                            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                            config=config,
+                            cache_dir=model_args.cache_dir,
+                            revision=model_args.model_revision,
+                            use_auth_token=True if model_args.use_auth_token else None,
+                            model_args=model_args
+                        )
+                    else:
+                        model = BertForCL.from_pretrained(
+                            model_args.model_name_or_path,
+                            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                            config=config,
+                            cache_dir=model_args.cache_dir,
+                            revision=model_args.model_revision,
+                            use_auth_token=True if model_args.use_auth_token else None,
+                            model_args=model_args
+                        )
 
         else:
             raise NotImplementedError
@@ -863,11 +870,11 @@ def main():
 
 
     # Choose trainer class based on use_coop flag
+    print("-----------------------------------------------")
+    print(">>> Loaded model class:", model.__class__.__name__)
     if model_args.use_coop:
-        print("Using CoOpTrainer")
         TrainerClass = CoOpTrainer
     else:
-        print("Using CLTrainer")
         TrainerClass = CLTrainer
 
     trainer = TrainerClass(
